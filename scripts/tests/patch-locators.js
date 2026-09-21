@@ -34,6 +34,27 @@ export function startApp() {
     myApp.whenReady().then(run);
 }
 
+export async function resolve(titleId, cancellation) {
+    const state = await store.state.pipe(first()).toPromise();
+    if (cancellation.canceled) {
+        throw new Error(cancellation.cancelReason);
+    }
+
+    const selectedBackend = state.settings?.trainerBackend ?? "auto";
+    let backend = "tophat",
+        experiment = null;
+    try {
+        const response = await api.resolveTrainerBackend(titleId, cancellation);
+        backend = response.backend;
+        experiment = response.experimentVariant;
+    } catch (error) {
+        console.info(`Backend resolution failed: ${error}`);
+    }
+
+    return "auto" !== selectedBackend && (backend = selectedBackend, experiment = null),
+        finish(backend, experiment);
+}
+
 export class RemoteClient {
     #trainerId;
     #instanceId;

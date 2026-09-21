@@ -106,6 +106,21 @@ namespace WandEnhancer.Core
                     }
                 },
                 {
+                    EPatchType.LegacyTrainerBackend,
+                    new[]
+                    {
+                        new PatchEntry
+                        {
+                            // TopHat currently injects successfully but never registers its IPC session.
+                            // Route every trainer through the legacy TrainerLib executor, which is still
+                            // shipped by Wand and avoids the broken TopHat session handshake.
+                            Name = "forceTrainerLibBackend",
+                            SearchHints = new[] { "resolveTrainerBackend" },
+                            Locate = LocateTrainerBackendResolver
+                        }
+                    }
+                },
+                {
                     EPatchType.RemoteWebPanelPreview,
                     new[]
                     {
@@ -164,6 +179,54 @@ namespace WandEnhancer.Core
             return Edits(reducer.ReplaceInBody(
                 @"account:\s*(?<account>[\w$]+)",
                 PatchPayload.Load("pro-account-reducer")));
+        }
+
+        /// <summary>
+        /// Uses TrainerLib whenever Wand would otherwise resolve the backend automatically.
+        /// The TopHat service is injected but never dials back in on affected installations.
+        /// </summary>
+        private static JsEdit[] LocateTrainerBackendResolver(JsCursor js)
+        {
+            for (int anchor = js.IndexOf("trainerBackend"); anchor >= 0;
+                 anchor = js.IndexOf("trainerBackend", anchor + "trainerBackend".Length))
+            {
+                var resolver = js.EnclosingFunction(anchor);
+                if (resolver == null || resolver.Body.IndexOf("resolveTrainerBackend", StringComparison.Ordinal) < 0)
+                {
+                    continue;
+                }
+
+                var setting = Regex.Match(
+                    resolver.Body,
+                    @"const\s+(?<setting>[\w$]+)\s*=\s*[\w$]+\.settings\?\.\s*trainerBackend\s*\?\?\s*""auto""\s*;?");
+                var backend = Regex.Match(
+                    resolver.Body,
+                    @"let\s+(?<backend>[\w$]+)\s*=\s*""tophat""\s*,\s*(?<experiment>[\w$]+)\s*=\s*null\b");
+
+                if (!setting.Success || !backend.Success)
+                {
+                    continue;
+                }
+
+                var backendSelection = Regex.Match(
+                    resolver.Body,
+                    $@"(?:(?:""auto""\s*!==\s*{Regex.Escape(setting.Groups["setting"].Value)})|(?:{Regex.Escape(setting.Groups["setting"].Value)}\s*!==\s*""auto""))\s*&&\s*\(\s*{Regex.Escape(backend.Groups["backend"].Value)}\s*=\s*{Regex.Escape(setting.Groups["setting"].Value)}\s*,\s*{Regex.Escape(backend.Groups["experiment"].Value)}\s*=\s*null\s*\),");
+                if (!backendSelection.Success)
+                {
+                    continue;
+                }
+
+                string payload = PatchPayload.Load(
+                    "trainerlib-backend",
+                    "setting", setting.Groups["setting"].Value,
+                    "backend", backend.Groups["backend"].Value,
+                    "experiment", backend.Groups["experiment"].Value);
+
+                int insertAt = resolver.BodyOpen + 1 + backendSelection.Index + backendSelection.Length;
+                return Edits(new JsEdit(insertAt, insertAt, payload));
+            }
+
+            return null;
         }
 
         private static JsEdit[] LocateUpdateHandler(JsCursor js)
